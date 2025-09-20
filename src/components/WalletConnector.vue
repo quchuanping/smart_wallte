@@ -1,167 +1,881 @@
 <template>
   <div class="wallet-container">
-    <!-- 连接钱包 -->
-    <button @click="connectWallet" :disabled="isConnecting">
-      {{ isConnecting ? '连接中...' : '连接 OKX 钱包' }}
-    </button>
-    <p v-if="account">当前账户: {{ account }}</p>
-    <p v-if="error" class="error">{{ error }}</p>
+    <div class="card">
+      <h1>OKX 智能钱包 (Polygon 主网)</h1>
 
-    <!-- 转账表单 -->
-    <div v-if="account" class="transfer-form">
-      <h3>转账 ERC20 代币 (USDT)</h3>
-      <input v-model="toAddress" placeholder="接收地址 (0x...)" />
-      <input v-model.number="amount" type="number" placeholder="转账金额 (如 100)" />
-      <button @click="transferToken" :disabled="isTransferring">
-        {{ isTransferring ? '转账中...' : '执行转账' }}
-      </button>
-      <p v-if="txHash">交易哈希: <a :href="explorerUrl" target="_blank">{{ txHash }}</a></p>
+      <!-- 连接钱包 -->
+      <div v-if="!isConnected" class="section">
+        <button
+            @click="connectWallet"
+            :disabled="isConnecting"
+            class="btn btn-primary"
+        >
+          {{ isConnecting ? '连接中...' : '连接 OKX 钱包' }}
+        </button>
+      </div>
+
+      <!-- 已连接状态 -->
+      <div v-else>
+        <p class="address">已连接：{{ userAddress.slice(0, 6) }}...{{ userAddress.slice(-4) }}</p>
+
+        <!-- 代币选择 -->
+        <div class="section">
+          <h2>选择代币</h2>
+          <select v-model="selectedToken" class="input" @change="onTokenChange">
+            <option v-for="token in tokens" :key="token.address" :value="token">
+              {{ token.symbol }}
+            </option>
+          </select>
+          <p v-if="selectedToken">当前代币: {{ selectedToken.symbol }} ({{ selectedToken.address }})</p>
+<!--          <p v-if="selectedToken.decimals">小数位数: {{ selectedToken.decimals }}</p>-->
+        </div>
+
+        <!-- 余额显示 -->
+        <div class="section">
+          <p>钱包余额：{{ formatBalance(balance, selectedToken.decimals) }} {{ selectedToken.symbol }}</p>
+          <p>智能钱包余额：{{ formatBalance(walletBalance, selectedToken.decimals) }} {{ selectedToken.symbol }}</p>
+          <p v-if="lastWithdrawTime">上次提取时间：{{ formatTime(lastWithdrawTime) }}</p>
+          <div class="info-box" v-if="withdrawLimitInfo">
+            {{ withdrawLimitInfo }}
+          </div>
+        </div>
+
+        <!-- 存款 -->
+        <div class="section">
+          <h2>存款 {{ selectedToken.symbol }}</h2>
+          <input
+              v-model="depositAmount"
+              type="number"
+              :step="getInputStep(selectedToken.decimals)"
+              :placeholder="`请输入存款金额 (最小单位: ${getInputStep(selectedToken.decimals)})`"
+              class="input"
+          />
+          <button
+              @click="deposit"
+              :disabled="isProcessing"
+              class="btn btn-success"
+          >
+            {{ isProcessing ? '处理中...' : '存款' }}
+          </button>
+        </div>
+
+        <!-- 提取 -->
+        <div class="section">
+          <h2>提取 {{ selectedToken.symbol }}</h2>
+          <input
+              v-model="withdrawAmount"
+              type="number"
+              :step="getInputStep(selectedToken.decimals)"
+              :placeholder="`请输入提取金额 (最小单位: ${getInputStep(selectedToken.decimals)})`"
+              class="input"
+          />
+          <button
+              @click="withdraw"
+              :disabled="isProcessing"
+              class="btn btn-danger"
+          >
+            {{ isProcessing ? '处理中...' : '提取' }}
+          </button>
+        </div>
+
+        <!-- 直接转账 -->
+        <div class="section">
+          <h2>直接转账 {{ selectedToken.symbol }}</h2>
+          <input
+              v-model="toAddress"
+              placeholder="接收地址 (0x...)"
+              class="input"
+          />
+          <input
+              v-model.number="transferAmount"
+              type="number"
+              :step="getInputStep(selectedToken.decimals)"
+              :placeholder="`转账金额 (最小单位: ${getInputStep(selectedToken.decimals)})`"
+              class="input"
+          />
+          <button
+              @click="transferToken"
+              :disabled="isProcessing"
+              class="btn btn-primary"
+          >
+            {{ isProcessing ? '转账中...' : '执行转账' }}
+          </button>
+          <p v-if="txHash" class="tx-link">
+            交易哈希: <a :href="explorerUrl" target="_blank">{{ txHash.slice(0, 10) }}...{{ txHash.slice(-8) }}</a>
+          </p>
+        </div>
+
+        <!-- 消息提示 -->
+        <p v-if="successMessage" class="success">{{ successMessage }}</p>
+        <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
-import Web3 from 'web3'
+import { ref, markRaw, computed, onMounted } from 'vue'
+import { ethers } from 'ethers'
 
-// 状态管理
-const account = ref('')
-const isConnecting = ref(false)
-const error = ref('')
+// 验证 ethers.providers 是否存在
+if (!ethers.providers) {
+  console.error('ethers.providers 未定义，请检查 ethers.js 版本和导入')
+  throw new Error('ethers.js 初始化失败')
+}
+
+// 代币列表 - Polygon 主网
+const tokens = [
+  {
+    symbol: 'USDT',
+    address: '0xc2132D05D31c914a87C6611C10748AEb04B58e8F',
+    decimals: 6
+  },
+  {
+    symbol: 'USDC',
+    address: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
+    decimals: 6
+  },
+  {
+    symbol: 'DAI',
+    address: '0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063',
+    decimals: 18
+  },
+  {
+    symbol: 'WETH',
+    address: '0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619',
+    decimals: 18
+  },
+  {
+    symbol: 'WBTC',
+    address: '0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6',
+    decimals: 8
+  },
+  {
+    symbol: 'MATIC',
+    address: '0x0000000000000000000000000000000000001010', // 原生代币的特殊地址
+    decimals: 18,
+    isNative: true
+  },
+  {
+    symbol: 'POL',
+    address: '0x455e53CBB86018Ac2B8092FdCd39d8444aFFC3F6', // 原生代币的特殊地址
+    decimals: 18,
+    isNative: true
+  }
+]
+
+// 合约 ABI - 简化版本，只包含必要函数
+const tokenABI = [
+  "function balanceOf(address owner) view returns (uint256)",
+  "function transfer(address to, uint256 amount) returns (bool)",
+  "function approve(address spender, uint256 amount) returns (bool)",
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function decimals() view returns (uint8)",
+  "event Transfer(address indexed from, address indexed to, uint256 value)"
+]
+
+const walletABI = [
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "tokenAddress",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      }
+    ],
+    "name": "deposit",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "tokenAddress",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      }
+    ],
+    "name": "withdraw",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "user",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "tokenAddress",
+        "type": "address"
+      }
+    ],
+    "name": "getBalance",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": 'function'
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "name": "lastWithdrawTime",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": 'function'
+  }
+]
+
+// 智能钱包地址 - 需要替换为您的 Polygon 主网合约地址
+const SMART_WALLET_ADDRESS = '0xe86f09395004fbc92352538fd3427ca237b7584c'
+
+// 响应式状态
+const provider = ref(null)
+const signer = ref(null)
+const userAddress = ref('')
+const tokenContract = ref(null)
+const walletContract = ref(null)
+const selectedToken = ref(tokens[0]) // 默认选择第一个代币 (USDT)
+const balance = ref('0')
+const walletBalance = ref('0')
+const lastWithdrawTime = ref(0)
+const depositAmount = ref('')
+const withdrawAmount = ref('')
 const toAddress = ref('')
-const amount = ref(0)
-const isTransferring = ref(false)
+const transferAmount = ref(0)
 const txHash = ref('')
-let web3 = null
+const isConnected = ref(false)
+const isConnecting = ref(false)
+const isProcessing = ref(false)
+const errorMessage = ref('')
+const successMessage = ref('')
+const withdrawLimitInfo = ref('')
 
-// Etherscan 交易链接
-const explorerUrl = computed(() => `https://etherscan.io/tx/${txHash.value}`)
+// PolygonScan 交易链接
+const explorerUrl = computed(() => `https://polygonscan.com/tx/${txHash.value}`)
+
+// 格式化时间显示
+const formatTime = (timestamp) => {
+  if (!timestamp) return '无记录'
+  return new Date(timestamp * 1000).toLocaleString()
+}
+
+// 格式化余额显示
+const formatBalance = (balance, decimals) => {
+  if (!balance || balance === '0') return '0'
+
+  try {
+    console.log("decimals: " + decimals)
+    // 根据代币小数位数格式化显示
+    // const divisor = Math.pow(10, decimals)
+    // const formatted = (parseFloat(balance) / divisor).toFixed(decimals > 4 ? 4 : decimals)
+    const formatted = balance
+    // 移除末尾的零
+    return formatted.replace(/\.?0+$/, '')
+  } catch (error) {
+    console.error('格式化余额错误:', error)
+    return balance
+  }
+}
+
+// 获取输入框的步长（最小单位）
+const getInputStep = (decimals) => {
+  return 1 / Math.pow(10, decimals)
+}
+
+// 代币变更处理
+const onTokenChange = async () => {
+  if (!signer.value) return
+
+  try {
+    // 如果是原生代币(MATIC)，不需要初始化代币合约
+    if (!selectedToken.value.isNative) {
+      // 重新初始化代币合约
+      tokenContract.value = new ethers.Contract(selectedToken.value.address, tokenABI, signer.value)
+
+      // 尝试从链上获取实际的小数位数
+      try {
+        const onChainDecimals = await tokenContract.value.decimals()
+        if (onChainDecimals !== selectedToken.value.decimals) {
+          console.log(`更新 ${selectedToken.value.symbol} 小数位数: ${selectedToken.value.decimals} -> ${onChainDecimals}`)
+          selectedToken.value.decimals = onChainDecimals
+        }
+      } catch (error) {
+        console.warn(`无法获取 ${selectedToken.value.symbol} 的小数位数，使用预设值:`, selectedToken.value.decimals)
+      }
+    }
+
+    // 更新余额信息
+    await updateAll()
+  } catch (error) {
+    console.error('切换代币错误:', error)
+    errorMessage.value = `切换代币失败: ${error.message}`
+  }
+}
 
 // 连接 OKX 钱包
-const connectWallet = async () => {
-  if (!window.okxwallet) {
-    error.value = '请安装 OKX Wallet 浏览器扩展！'
+async function connectWallet() {
+  let ethereumProvider = window.okxwallet || window.ethereum
+  if (!ethereumProvider) {
+    errorMessage.value = '请安装 OKX Wallet 或 MetaMask！'
+    console.error('钱包未检测到')
     return
   }
 
   try {
     isConnecting.value = true
-    web3 = new Web3(window.okxwallet)
+    errorMessage.value = ''
 
-    // 请求连接账户
-    const accounts = await window.okxwallet.request({
-      method: 'eth_requestAccounts'
-    })
-    account.value = accounts[0]
-    error.value = ''
-    console.log('连接成功，账户:', account.value)
+    // 请求账户授权
+    await ethereumProvider.request({ method: 'eth_requestAccounts' })
 
-    // 切换到 Ethereum 主网 (chainId: 0x1)
+    // 初始化 Web3Provider
+    provider.value = markRaw(new ethers.providers.Web3Provider(ethereumProvider))
+    signer.value = provider.value.getSigner()
+    userAddress.value = await signer.value.getAddress()
+
+    // 获取当前网络
+    let chainId
     try {
-      await window.okxwallet.request({
-        method: 'wallet_switchEthereumChain',
-        params: [{ chainId: '0x1' }]
-      })
-    } catch (switchError) {
-      if (switchError.code === 4902) {
-        await window.okxwallet.request({
-          method: 'wallet_addEthereumChain',
-          params: [{
-            chainId: '0x1',
-            chainName: 'Ethereum Mainnet',
-            rpcUrls: ['https://mainnet.infura.io/v3/YOUR_INFURA_KEY'], // 替换为你的 Infura RPC
-            nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-            blockExplorerUrls: ['https://etherscan.io']
-          }]
+      chainId = await ethereumProvider.request({ method: 'eth_chainId' })
+      chainId = parseInt(chainId, 16)
+    } catch (error) {
+      console.warn('查询 eth_chainId 失败:', error)
+      throw new Error('无法获取网络信息，请检查 OKX Wallet 设置')
+    }
+
+    // Polygon 主网 chainId 是 137
+    if (chainId !== 137) {
+      try {
+        await ethereumProvider.request({
+          method: 'wallet_switchEthereumChain',
+          params: [{ chainId: '0x89' }] // Polygon 主网的 chainId 是 0x89
         })
-      } else {
-        throw switchError
+        chainId = parseInt(await ethereumProvider.request({ method: 'eth_chainId' }), 16)
+      } catch (switchError) {
+        if (switchError.code === 4902) {
+          await ethereumProvider.request({
+            method: 'wallet_addEthereumChain',
+            params: [{
+              chainId: '0x89',
+              chainName: 'Polygon Mainnet',
+              rpcUrls: ['https://polygon-rpc.com/'],
+              nativeCurrency: {
+                name: 'MATIC',
+                symbol: 'MATIC',
+                decimals: 18
+              },
+              blockExplorerUrls: ['https://polygonscan.com/']
+            }]
+          })
+          chainId = parseInt(await ethereumProvider.request({ method: 'eth_chainId' }), 16)
+        } else {
+          throw switchError
+        }
       }
     }
-  } catch (err) {
-    error.value = `连接失败: ${err.message}`
-    console.error(err)
+
+    if (chainId !== 137) {
+      throw new Error('无法切换到 Polygon 主网，请手动检查 OKX Wallet 网络设置')
+    }
+
+    isConnected.value = true
+
+    // 验证智能钱包地址
+    if (!ethers.utils.isAddress(SMART_WALLET_ADDRESS)) {
+      errorMessage.value = '无效的智能钱包地址，请检查 SMART_WALLET_ADDRESS'
+      return
+    }
+
+    // 初始化智能钱包合约
+    walletContract.value = new ethers.Contract(SMART_WALLET_ADDRESS, walletABI, signer.value)
+
+    // 如果不是原生代币，初始化代币合约
+    if (!selectedToken.value.isNative) {
+      tokenContract.value = new ethers.Contract(selectedToken.value.address, tokenABI, signer.value)
+
+      // 尝试从链上获取实际的小数位数
+      try {
+        const onChainDecimals = await tokenContract.value.decimals()
+        if (onChainDecimals !== selectedToken.value.decimals) {
+          console.log(`更新 ${selectedToken.value.symbol} 小数位数: ${selectedToken.value.decimals} -> ${onChainDecimals}`)
+          selectedToken.value.decimals = onChainDecimals
+        }
+      } catch (error) {
+        console.warn(`无法获取 ${selectedToken.value.symbol} 的小数位数，使用预设值:`, selectedToken.value.decimals)
+      }
+    }
+
+    await updateAll()
+    successMessage.value = '钱包连接成功！'
+  } catch (error) {
+    errorMessage.value = `连接失败：${error.message || '未知错误'}`
+    console.error('连接钱包错误:', error)
   } finally {
     isConnecting.value = false
   }
 }
 
-// 执行 ERC20 转账
-const transferToken = async () => {
-  if (!web3 || !account.value) {
-    error.value = '请先连接钱包'
-    return
+// 更新所有信息
+async function updateAll() {
+  await updateBalances()
+  await updateLastWithdrawTime()
+  await updateWithdrawLimitInfo()
+}
+
+// 更新余额
+async function updateBalances() {
+  if (!signer.value) return
+  try {
+    if (selectedToken.value.isNative) {
+      // 获取原生代币 (MATIC) 余额
+      const userBal = await provider.value.getBalance(userAddress.value)
+      balance.value = ethers.utils.formatUnits(userBal, selectedToken.value.decimals)
+    } else {
+      // 获取 ERC20 代币余额
+      const userBal = await tokenContract.value.balanceOf(userAddress.value)
+      balance.value = ethers.utils.formatUnits(userBal, selectedToken.value.decimals)
+    }
+
+    // 获取智能钱包中的代币余额
+    const walletBal = await walletContract.value.getBalance(userAddress.value, selectedToken.value.address)
+    walletBalance.value = ethers.utils.formatUnits(walletBal, selectedToken.value.decimals)
+  } catch (error) {
+    console.error('更新余额错误:', error)
+  }
+}
+
+// 更新上次提取时间
+async function updateLastWithdrawTime() {
+  if (!signer.value) return
+  try {
+    lastWithdrawTime.value = await walletContract.value.lastWithdrawTime(userAddress.value, selectedToken.value.address)
+  } catch (error) {
+    console.error('更新提取时间错误:', error)
+    lastWithdrawTime.value = 0
+  }
+}
+
+// 更新提取限制信息
+async function updateWithdrawLimitInfo() {
+  if (!signer.value) return
+
+  try {
+    const userBal = await walletContract.value.getBalance(userAddress.value, selectedToken.value.address)
+    const lastTime = lastWithdrawTime.value
+    const currentTime = Math.floor(Date.now() / 1000)
+
+    const timeSinceLastWithdraw = lastTime === 0 ? currentTime : currentTime - lastTime
+
+    if (timeSinceLastWithdraw >= 30 * 24 * 60 * 60) {
+      withdrawLimitInfo.value = '可提取全部余额'
+    } else if (timeSinceLastWithdraw >= 24 * 60 * 60) {
+      const thirtyPercent = userBal.mul(30).div(100)
+      const formattedAmount = ethers.utils.formatUnits(thirtyPercent, selectedToken.value.decimals)
+      withdrawLimitInfo.value = `24小时内最多可提取${formattedAmount} ${selectedToken.value.symbol} (30%)`
+    } else {
+      const remainingTime = 24 * 60 * 60 - timeSinceLastWithdraw
+      const hours = Math.floor(remainingTime / 3600)
+      const minutes = Math.floor((remainingTime % 3600) / 60)
+      withdrawLimitInfo.value = `还需等待 ${hours}小时${minutes}分钟 才能再次提取`
+    }
+  } catch (error) {
+    console.error('更新提取限制信息错误:', error)
+    withdrawLimitInfo.value = '无法获取提取限制信息'
+  }
+}
+
+// 检查提取条件
+async function checkWithdrawConditions(amount) {
+  try {
+    const amountWei = ethers.utils.parseUnits(amount.toString(), selectedToken.value.decimals)
+    const userBal = await walletContract.value.getBalance(userAddress.value, selectedToken.value.address)
+
+    // 获取上次提取时间
+    const lastTime = lastWithdrawTime.value
+    const currentTime = Math.floor(Date.now() / 1000)
+
+    // 计算距离上次提取的时间（秒）
+    const timeSinceLastWithdraw = lastTime === 0 ? currentTime : currentTime - lastTime
+
+    // 检查是否满足30天条件
+    if (timeSinceLastWithdraw >= 30 * 24 * 60 * 60) {
+      return userBal.gte(amountWei) // 30天后可全额提取
+    }
+
+    // 检查是否满足24小时条件
+    if (timeSinceLastWithdraw >= 24 * 60 * 60) {
+      const thirtyPercent = userBal.mul(30).div(100)
+      return amountWei.lte(thirtyPercent) && userBal.gte(amountWei) // 24小时后可提取30%
+    }
+
+    // 不足24小时，不能提取
+    return false
+  } catch (error) {
+    console.error('检查提取条件错误:', error)
+    return false
+  }
+}
+
+// 授权代币
+async function approveToken(amount) {
+  if (!signer.value) {
+    errorMessage.value = '请先连接钱包'
+    return false
   }
 
-  if (!web3.utils.isAddress(toAddress.value) || amount.value <= 0) {
-    error.value = '请输入有效地址和金额'
+  // 原生代币不需要授权
+  if (selectedToken.value.isNative) {
+    return true
+  }
+
+  const amountWei = ethers.utils.parseUnits(amount.toString(), selectedToken.value.decimals)
+  try {
+    // 检查当前授权额度
+    const allowance = await tokenContract.value.allowance(userAddress.value, SMART_WALLET_ADDRESS)
+
+    // 如果已有足够授权，直接返回
+    if (allowance.gte(amountWei)) {
+      console.log('已有足够授权，无需再次授权')
+      return true
+    }
+
+    // 如果授权不足，先尝试重置授权为0（避免某些代币需要先重置）
+    if (!allowance.isZero()) {
+      console.log('重置授权为0...')
+      const resetTx = await tokenContract.value.approve(SMART_WALLET_ADDRESS, 0)
+      await resetTx.wait()
+    }
+
+    // 进行新授权
+    console.log('进行新授权...')
+    const tx = await tokenContract.value.approve(SMART_WALLET_ADDRESS, amountWei)
+    successMessage.value = `正在授权... 交易哈希：${tx.hash}`
+    await tx.wait()
+    successMessage.value = '授权成功'
+    return true
+  } catch (error) {
+    errorMessage.value = `授权失败：${error.message}`
+    console.error('授权错误:', error)
+    return false
+  }
+}
+
+// 存入代币
+async function deposit() {
+  if (!signer.value) {
+    errorMessage.value = '请先连接钱包'
+    return
+  }
+  if (!depositAmount.value || isNaN(depositAmount.value) || depositAmount.value <= 0) {
+    errorMessage.value = '请输入有效的存款金额'
     return
   }
 
   try {
-    isTransferring.value = true
-    const contractAddress = '0xdAC17F958D2ee523a2206206994597C13D831ec7' // USDT 合约地址
-    const contract = new web3.eth.Contract(erc20Abi, contractAddress)
+    isProcessing.value = true
+    errorMessage.value = ''
+    successMessage.value = ''
 
-    // 金额转换（USDT decimals=6）
-    const decimals = 6
-    const value = web3.utils.toBN(amount.value * 10 ** decimals)
+    const amountWei = ethers.utils.parseUnits(depositAmount.value.toString(), selectedToken.value.decimals)
 
-    // 估算 gas
-    const gasEstimate = await contract.methods.transfer(toAddress.value, value).estimateGas({
-      from: account.value
-    })
+    // 检查余额
+    let userBal
+    if (selectedToken.value.isNative) {
+      userBal = await provider.value.getBalance(userAddress.value)
+    } else {
+      userBal = await tokenContract.value.balanceOf(userAddress.value)
+    }
 
-    // 发送交易
-    const tx = await contract.methods.transfer(toAddress.value, value).send({
-      from: account.value,
-      gas: Math.round(gasEstimate * 1.2) // 增加 20% gas 防止波动
-    })
+    if (userBal.lt(amountWei)) {
+      errorMessage.value = '余额不足'
+      return
+    }
 
-    txHash.value = tx.transactionHash
-    error.value = ''
-    console.log('转账成功，Tx Hash:', txHash.value)
-  } catch (err) {
-    error.value = `转账失败: ${err.message}`
-    console.error(err)
+    // 授权代币（非原生代币）
+    if (!selectedToken.value.isNative) {
+      const approved = await approveToken(depositAmount.value)
+      if (!approved) return
+    }
+
+    const tx = await walletContract.value.deposit(
+        selectedToken.value.isNative ? '0x0000000000000000000000000000000000001010' : selectedToken.value.address,
+        amountWei
+    )
+    successMessage.value = `正在存款... 交易哈希：${tx.hash}`
+    await tx.wait()
+    successMessage.value = '存款成功'
+    await updateAll()
+    depositAmount.value = ''
+  } catch (error) {
+    errorMessage.value = `存款失败：${error.message}`
+    console.error('存款错误:', error)
   } finally {
-    isTransferring.value = false
+    isProcessing.value = false
   }
 }
+
+// 提取代币
+async function withdraw() {
+  if (!signer.value) {
+    errorMessage.value = '请先连接钱包'
+    return
+  }
+  if (!withdrawAmount.value || isNaN(withdrawAmount.value) || withdrawAmount.value <= 0) {
+    errorMessage.value = '请输入有效的提取金额'
+    return
+  }
+
+  try {
+    isProcessing.value = true
+    errorMessage.value = ''
+    successMessage.value = ''
+
+    // 检查提取条件
+    const canWithdraw = await checkWithdrawConditions(withdrawAmount.value)
+    if (!canWithdraw) {
+      errorMessage.value = '提取条件不满足：可能未满足时间限制或金额超过允许范围'
+      return
+    }
+
+    const amountWei = ethers.utils.parseUnits(withdrawAmount.value.toString(), selectedToken.value.decimals)
+    const tx = await walletContract.value.withdraw(selectedToken.value.address, amountWei)
+
+    successMessage.value = `正在提取... 交易哈希：${tx.hash}`
+    await tx.wait()
+    successMessage.value = '提取成功'
+    await updateAll()
+    withdrawAmount.value = ''
+  } catch (error) {
+    errorMessage.value = `提取失败：${error.message}`
+    console.error('提取错误:', error)
+  } finally {
+    isProcessing.value = false
+  }
+}
+
+// 直接转账
+async function transferToken() {
+  if (!signer.value) {
+    errorMessage.value = '请先连接钱包'
+    return
+  }
+  if (!ethers.utils.isAddress(toAddress.value) || !transferAmount.value || transferAmount.value <= 0) {
+    errorMessage.value = '请输入有效的接收地址和金额'
+    return
+  }
+
+  try {
+    isProcessing.value = true
+    errorMessage.value = ''
+    successMessage.value = ''
+
+    const amountWei = ethers.utils.parseUnits(transferAmount.value.toString(), selectedToken.value.decimals)
+
+    // 检查余额
+    let userBal
+    if (selectedToken.value.isNative) {
+      userBal = await provider.value.getBalance(userAddress.value)
+    } else {
+      userBal = await tokenContract.value.balanceOf(userAddress.value)
+    }
+
+    if (userBal.lt(amountWei)) {
+      errorMessage.value = '余额不足'
+      return
+    }
+
+    let tx
+    if (selectedToken.value.isNative) {
+      // 发送原生代币
+      tx = await signer.value.sendTransaction({
+        to: toAddress.value,
+        value: amountWei
+      })
+    } else {
+      // 发送 ERC20 代币
+      tx = await tokenContract.value.transfer(toAddress.value, amountWei)
+    }
+
+    successMessage.value = `正在转账... 交易哈希：${tx.hash}`
+    await tx.wait()
+    txHash.value = tx.hash
+    successMessage.value = '转账成功'
+    await updateBalances()
+    toAddress.value = ''
+    transferAmount.value = 0
+  } catch (error) {
+    errorMessage.value = `转账失败：${error.message}`
+    console.error('转账错误:', error)
+  } finally {
+    isProcessing.value = false
+  }
+}
+
+// 页面加载时检查是否已连接钱包
+onMounted(async () => {
+  const ethereumProvider = window.okxwallet || window.ethereum
+  if (ethereumProvider && ethereumProvider.selectedAddress) {
+    // 如果钱包已连接，自动连接
+    await connectWallet()
+  }
+})
 </script>
 
 <style scoped>
 .wallet-container {
-  max-width: 500px;
-  margin: 0 auto;
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background-color: #f0f2f5;
   padding: 20px;
+}
+
+.card {
+  background-color: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  padding: 24px;
+  max-width: 500px;
+  width: 100%;
   text-align: center;
 }
-.transfer-form {
-  margin-top: 20px;
+
+h1 {
+  font-size: 24px;
+  font-weight: bold;
+  margin-bottom: 20px;
 }
-input {
-  display: block;
+
+h2 {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.section {
+  margin-bottom: 20px;
+  padding: 15px;
+  border: 1px solid #eaeaea;
+  border-radius: 8px;
+}
+
+.address {
+  font-size: 14px;
+  margin-bottom: 20px;
+  color: 333;
+  word-break: break-all;
+}
+
+.input {
   width: 100%;
-  margin: 10px 0;
   padding: 8px;
+  margin-bottom: 10px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 14px;
 }
-button {
-  padding: 10px 20px;
-  background-color: #007bff;
-  color: white;
+
+.btn {
+  width: 100%;
+  padding: 10px;
   border: none;
+  border-radius: 4px;
+  color: white;
+  font-size: 16px;
   cursor: pointer;
+  margin-top: 10px;
 }
-button:disabled {
+
+.btn-primary {
+  background-color: #007bff;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background-color: #0056b3;
+}
+
+.btn-success {
+  background-color: #28a745;
+}
+
+.btn-success:hover:not(:disabled) {
+  background-color: #1e7e34;
+}
+
+.btn-danger {
+  background-color: #dc3545;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background-color: #b02a37;
+}
+
+.btn:disabled {
   background-color: #6c757d;
   cursor: not-allowed;
 }
-.error {
-  color: red;
+
+.success {
+  color: #28a745;
+  margin-top: 10px;
 }
-a {
+
+.error {
+  color: #dc3545;
+  margin-top: 10px;
+}
+
+.tx-link a {
   color: #007bff;
   text-decoration: none;
+}
+
+.tx-link a:hover {
+  text-decoration: underline;
+}
+
+.info-box {
+  background-color: #f8f9fa;
+  padding: 10px;
+  border-radius: 4px;
+  margin-top: 10px;
+  font-size: 14px;
 }
 </style>

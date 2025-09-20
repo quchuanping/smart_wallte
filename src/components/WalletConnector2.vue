@@ -18,10 +18,21 @@
       <div v-else>
         <p class="address">已连接：{{ userAddress.slice(0, 6) }}...{{ userAddress.slice(-4) }}</p>
 
+        <!-- 代币选择 -->
+        <div class="section">
+          <h2>选择代币</h2>
+          <select v-model="selectedToken" class="input" @change="onTokenChange">
+            <option v-for="token in tokens" :key="token.address" :value="token">
+              {{ token.symbol }}
+            </option>
+          </select>
+          <p v-if="selectedToken">当前代币: {{ selectedToken.symbol }} ({{ selectedToken.address }})</p>
+        </div>
+
         <!-- 余额显示 -->
         <div class="section">
-          <p>钱包余额：{{ balance }} USDT</p>
-          <p>智能钱包余额：{{ walletBalance }} USDT</p>
+          <p>钱包余额：{{ balance }} {{ selectedToken.symbol }}</p>
+          <p>智能钱包余额：{{ walletBalance }} {{ selectedToken.symbol }}</p>
           <p v-if="lastWithdrawTime">上次提取时间：{{ formatTime(lastWithdrawTime) }}</p>
           <div class="info-box" v-if="withdrawLimitInfo">
             {{ withdrawLimitInfo }}
@@ -30,7 +41,7 @@
 
         <!-- 存款 -->
         <div class="section">
-          <h2>存款 USDT</h2>
+          <h2>存款 {{ selectedToken.symbol }}</h2>
           <input
               v-model="depositAmount"
               type="number"
@@ -48,7 +59,7 @@
 
         <!-- 提取 -->
         <div class="section">
-          <h2>提取 USDT</h2>
+          <h2>提取 {{ selectedToken.symbol }}</h2>
           <input
               v-model="withdrawAmount"
               type="number"
@@ -66,7 +77,7 @@
 
         <!-- 直接转账 -->
         <div class="section">
-          <h2>直接转账 USDT</h2>
+          <h2>直接转账 {{ selectedToken.symbol }}</h2>
           <input
               v-model="toAddress"
               placeholder="接收地址 (0x...)"
@@ -75,7 +86,7 @@
           <input
               v-model.number="transferAmount"
               type="number"
-              placeholder="转账金额 (如 100)"
+              placeholder="转账金额"
               class="input"
           />
           <button
@@ -107,6 +118,25 @@ if (!ethers.providers) {
   console.error('ethers.providers 未定义，请检查 ethers.js 版本和导入')
   throw new Error('ethers.js 初始化失败')
 }
+
+// 代币列表
+const tokens = [
+  {
+    symbol: 'USDT',
+    address: '0x1ba13513dbfebaf1b588960119b5f04696ebd7d5',
+    decimals: 6
+  },
+  {
+    symbol: 'DAI',
+    address: '0x73967c6a0904aa032c103b4104747e88c566b1a2',
+    decimals: 18
+  },
+  {
+    symbol: 'LINK',
+    address: '0x779877A7B0D9E8603169DdbD7836e478b4624789',
+    decimals: 18
+  }
+]
 
 // 合约 ABI - 简化版本，只包含必要函数
 const tokenABI = [
@@ -205,9 +235,8 @@ const walletABI = [
   }
 ]
 
-// 合约地址
+// 智能钱包地址
 const SMART_WALLET_ADDRESS = '0xf954A73f1A972Ff6Bb6E21bb7d5496b9C3B16750'
-const TOKEN_ADDRESS = '0x1ba13513dbfebaf1b588960119b5f04696ebd7d5'
 
 // 响应式状态
 const provider = ref(null)
@@ -215,7 +244,7 @@ const signer = ref(null)
 const userAddress = ref('')
 const tokenContract = ref(null)
 const walletContract = ref(null)
-const tokenDecimals = ref(6)
+const selectedToken = ref(tokens[0]) // 默认选择第一个代币 (USDT)
 const balance = ref('0')
 const walletBalance = ref('0')
 const lastWithdrawTime = ref(0)
@@ -238,6 +267,22 @@ const explorerUrl = computed(() => `https://sepolia.etherscan.io/tx/${txHash.val
 const formatTime = (timestamp) => {
   if (!timestamp) return '无记录'
   return new Date(timestamp * 1000).toLocaleString()
+}
+
+// 代币变更处理
+const onTokenChange = async () => {
+  if (!signer.value) return
+
+  try {
+    // 重新初始化代币合约
+    tokenContract.value = new ethers.Contract(selectedToken.value.address, tokenABI, signer.value)
+
+    // 更新余额信息
+    await updateAll()
+  } catch (error) {
+    console.error('切换代币错误:', error)
+    errorMessage.value = `切换代币失败: ${error.message}`
+  }
 }
 
 // 连接 OKX 钱包
@@ -307,28 +352,15 @@ async function connectWallet() {
 
     isConnected.value = true
 
-    // 验证合约地址
-    if (!ethers.utils.isAddress(TOKEN_ADDRESS)) {
-      errorMessage.value = '无效的 USDT 合约地址，请检查 TOKEN_ADDRESS'
-      return
-    }
+    // 验证智能钱包地址
     if (!ethers.utils.isAddress(SMART_WALLET_ADDRESS)) {
       errorMessage.value = '无效的智能钱包地址，请检查 SMART_WALLET_ADDRESS'
       return
     }
 
     // 初始化合约
-    tokenContract.value = new ethers.Contract(TOKEN_ADDRESS, tokenABI, signer.value)
+    tokenContract.value = new ethers.Contract(selectedToken.value.address, tokenABI, signer.value)
     walletContract.value = new ethers.Contract(SMART_WALLET_ADDRESS, walletABI, signer.value)
-
-    // 获取代币小数位
-    try {
-      tokenDecimals.value = await tokenContract.value.decimals()
-    } catch (error) {
-      console.error('获取代币小数位错误:', error)
-      // 默认为6，USDT常见小数位
-      tokenDecimals.value = 6
-    }
 
     await updateAll()
     successMessage.value = '钱包连接成功！'
@@ -351,10 +383,11 @@ async function updateAll() {
 async function updateBalances() {
   if (!signer.value) return
   try {
-    const userBalance = await tokenContract.value.balanceOf(userAddress.value)
-    balance.value = ethers.utils.formatUnits(userBalance, tokenDecimals.value)
-    const walletBal = await walletContract.value.getBalance(userAddress.value, TOKEN_ADDRESS)
-    walletBalance.value = ethers.utils.formatUnits(walletBal, tokenDecimals.value)
+    const userBal = await tokenContract.value.balanceOf(userAddress.value)
+    balance.value = ethers.utils.formatUnits(userBal, selectedToken.value.decimals)
+
+    const walletBal = await walletContract.value.getBalance(userAddress.value, selectedToken.value.address)
+    walletBalance.value = ethers.utils.formatUnits(walletBal, selectedToken.value.decimals)
   } catch (error) {
     console.error('更新余额错误:', error)
   }
@@ -364,7 +397,7 @@ async function updateBalances() {
 async function updateLastWithdrawTime() {
   if (!signer.value) return
   try {
-    lastWithdrawTime.value = await walletContract.value.lastWithdrawTime(userAddress.value, TOKEN_ADDRESS)
+    lastWithdrawTime.value = await walletContract.value.lastWithdrawTime(userAddress.value, selectedToken.value.address)
   } catch (error) {
     console.error('更新提取时间错误:', error)
     lastWithdrawTime.value = 0
@@ -376,7 +409,7 @@ async function updateWithdrawLimitInfo() {
   if (!signer.value) return
 
   try {
-    const userBal = await walletContract.value.getBalance(userAddress.value, TOKEN_ADDRESS)
+    const userBal = await walletContract.value.getBalance(userAddress.value, selectedToken.value.address)
     const lastTime = lastWithdrawTime.value
     const currentTime = Math.floor(Date.now() / 1000)
 
@@ -386,8 +419,8 @@ async function updateWithdrawLimitInfo() {
       withdrawLimitInfo.value = '可提取全部余额'
     } else if (timeSinceLastWithdraw >= 24 * 60 * 60) {
       const thirtyPercent = userBal.mul(30).div(100)
-      const formattedAmount = ethers.utils.formatUnits(thirtyPercent, tokenDecimals.value)
-      withdrawLimitInfo.value = `24小时内最多可提取${formattedAmount} USDT (30%)`
+      const formattedAmount = ethers.utils.formatUnits(thirtyPercent, selectedToken.value.decimals)
+      withdrawLimitInfo.value = `24小时内最多可提取${formattedAmount} ${selectedToken.value.symbol} (30%)`
     } else {
       const remainingTime = 24 * 60 * 60 - timeSinceLastWithdraw
       const hours = Math.floor(remainingTime / 3600)
@@ -403,8 +436,8 @@ async function updateWithdrawLimitInfo() {
 // 检查提取条件
 async function checkWithdrawConditions(amount) {
   try {
-    const amountWei = ethers.utils.parseUnits(amount.toString(), tokenDecimals.value)
-    const userBal = await walletContract.value.getBalance(userAddress.value, TOKEN_ADDRESS)
+    const amountWei = ethers.utils.parseUnits(amount.toString(), selectedToken.value.decimals)
+    const userBal = await walletContract.value.getBalance(userAddress.value, selectedToken.value.address)
 
     // 获取上次提取时间
     const lastTime = lastWithdrawTime.value
@@ -439,7 +472,7 @@ async function approveToken(amount) {
     return false
   }
 
-  const amountWei = ethers.utils.parseUnits(amount.toString(), tokenDecimals.value)
+  const amountWei = ethers.utils.parseUnits(amount.toString(), selectedToken.value.decimals)
   try {
     // 检查当前授权额度
     const allowance = await tokenContract.value.allowance(userAddress.value, SMART_WALLET_ADDRESS)
@@ -487,9 +520,10 @@ async function deposit() {
     errorMessage.value = ''
     successMessage.value = ''
 
-    const amountWei = ethers.utils.parseUnits(depositAmount.value.toString(), tokenDecimals.value)
-    const userBalance = await tokenContract.value.balanceOf(userAddress.value)
-    if (userBalance.lt(amountWei)) {
+    const amountWei = ethers.utils.parseUnits(depositAmount.value.toString(), selectedToken.value.decimals)
+    const userBal = await tokenContract.value.balanceOf(userAddress.value)
+
+    if (userBal.lt(amountWei)) {
       errorMessage.value = '余额不足'
       return
     }
@@ -497,7 +531,7 @@ async function deposit() {
     const approved = await approveToken(depositAmount.value)
     if (!approved) return
 
-    const tx = await walletContract.value.deposit(TOKEN_ADDRESS, amountWei)
+    const tx = await walletContract.value.deposit(selectedToken.value.address, amountWei)
     successMessage.value = `正在存款... 交易哈希：${tx.hash}`
     await tx.wait()
     successMessage.value = '存款成功'
@@ -534,8 +568,8 @@ async function withdraw() {
       return
     }
 
-    const amountWei = ethers.utils.parseUnits(withdrawAmount.value.toString(), tokenDecimals.value)
-    const tx = await walletContract.value.withdraw(TOKEN_ADDRESS, amountWei)
+    const amountWei = ethers.utils.parseUnits(withdrawAmount.value.toString(), selectedToken.value.decimals)
+    const tx = await walletContract.value.withdraw(selectedToken.value.address, amountWei)
 
     successMessage.value = `正在提取... 交易哈希：${tx.hash}`
     await tx.wait()
@@ -566,9 +600,10 @@ async function transferToken() {
     errorMessage.value = ''
     successMessage.value = ''
 
-    const amountWei = ethers.utils.parseUnits(transferAmount.value.toString(), tokenDecimals.value)
-    const userBalance = await tokenContract.value.balanceOf(userAddress.value)
-    if (userBalance.lt(amountWei)) {
+    const amountWei = ethers.utils.parseUnits(transferAmount.value.toString(), selectedToken.value.decimals)
+    const userBal = await tokenContract.value.balanceOf(userAddress.value)
+
+    if (userBal.lt(amountWei)) {
       errorMessage.value = '余额不足'
       return
     }
